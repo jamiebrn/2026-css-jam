@@ -34,6 +34,7 @@ struct LightingMap {
 	) const {
 		constexpr int rayCount = 128;
 		constexpr int lightBands = 8;
+		constexpr float bandStepDistance = 4;
 		constexpr float rayStep = 0.5f;
 		const Color lightColor{246, 154, 84, 18};
 
@@ -78,19 +79,40 @@ struct LightingMap {
 				static_cast<float>(source.y - scrY)
 			};
 
-			for (int band = lightBands; band > 0; --band) {
-				const float scale = band / static_cast<float>(lightBands);
-				for (int ray = 0; ray < rayCount; ++ray) {
+			for (int ray = 0; ray < rayCount; ++ray) {
+				for (int band = lightBands; band > 0; --band) {
+					const float scale = band / static_cast<float>(lightBands);
+
 					const Vector2 first{
 						center.x + (endpoints[ray].x - center.x) * scale,
 						center.y + (endpoints[ray].y - center.y) * scale
 					};
 					const Vector2& nextEndpoint = endpoints[(ray + 1) % rayCount];
+
 					const Vector2 second{
 						center.x + (nextEndpoint.x - center.x) * scale,
 						center.y + (nextEndpoint.y - center.y) * scale
 					};
-					DrawTriangle(center, second, first, lightColor);
+
+					Vector2 endpointAvg = {
+						(endpoints[ray].x + nextEndpoint.x) / 2.0f,
+						(endpoints[ray].y + nextEndpoint.y) / 2.0f
+					};
+
+					Vector2 endpointAvgDist = {
+						endpointAvg.x - center.x,
+						endpointAvg.y - center.y
+					};
+
+					float endpointDist = sqrt(
+						endpointAvgDist.x * endpointAvgDist.x +
+						endpointAvgDist.y * endpointAvgDist.y
+					);
+
+					int bandMax = endpointDist / bandStepDistance;
+					if (bandMax > band) {
+						DrawTriangle(center, second, first, lightColor);
+					}
 				}
 			}
 		}
