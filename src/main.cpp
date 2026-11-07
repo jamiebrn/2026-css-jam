@@ -55,6 +55,7 @@ struct GameAssets {
     Music bgm;
 
     AnimatedSprite chronosSprite;
+    AnimatedSprite cogSprite;
 };
 
 struct GameState {
@@ -554,6 +555,31 @@ void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
         {180, 180, 180, 255}
     );
 
+    if (!state->testItem.collected) {
+        state->assets.cogSprite.updateFrame(deltaTime);
+
+        DrawTexturePro(
+            state->assets.cogSprite.getCurrentTexture(),
+            {
+                0, 0,
+                (float)state->assets.cogSprite.getCurrentTexture().width,
+                (float)state->assets.cogSprite.getCurrentTexture().height
+            },
+            {
+                state->testItem.position.x,
+                state->testItem.position.y,
+                (float)state->assets.cogSprite.getCurrentTexture().width,
+                (float)state->assets.cogSprite.getCurrentTexture().height
+            },
+            {
+                (float)state->assets.cogSprite.getCurrentTexture().width / 2,
+                (float)state->assets.cogSprite.getCurrentTexture().height / 2
+            },
+            0.0f,
+            {180, 180, 180, 255}
+        );
+    }
+
     const float shakeX = state->playerShakeTimer > 0.0f
         ? std::sin(GetTime() * 70.0f) * 3.0f
         : 0.0f;
@@ -578,9 +604,11 @@ void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
             PLAYER_LIGHT_SIZE / 2
         }
     };
+
     state->lightingMap.calcAndDrawLights(
         lightSources, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT
     );
+
     DrawText(
         state->testItem.collected ? "Item: 1/1" : "Item: 0/1",
         8,
@@ -588,16 +616,6 @@ void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
         10,
         RAYWHITE
     );
-
-    if (!state->testItem.collected) {
-        DrawRectangle(
-            (int)state->testItem.position.x - 4,
-            (int)state->testItem.position.y - 4,
-            8,
-            8,
-            GOLD
-        );
-    }
 
     DrawRectangle(
         (int)state->testExit.position.x - 6,
@@ -745,6 +763,18 @@ GameAssets loadAssets() {
             "assets/chronos-anim3.png",
             "assets/chronos-anim4.png",
             "assets/chronos-anim5.png"
+        },
+        0.1f
+    );
+
+    assets.cogSprite = AnimatedSprite(
+        {
+            "assets/cog-anim1.png",
+            "assets/cog-anim2.png",
+            "assets/cog-anim3.png",
+            "assets/cog-anim4.png",
+            "assets/cog-anim5.png",
+            "assets/cog-anim6.png"
         },
         0.1f
     );
