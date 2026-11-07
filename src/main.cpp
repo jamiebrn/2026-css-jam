@@ -10,6 +10,9 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <atomic>
+#include <string>
+#include <tuple>
 
 
 //Concurrency and monads, what could go wrong.
@@ -135,8 +138,29 @@ void draw_button(const char* title, Rectangle button,bool overHover){
 
 //Concurrency MVP.
 
-std::vector<std::tuple<GameState,std::chrono::time_point<std::chrono::system_clock>>> timeLogger;
-static float timeAccumulator = 0.0f;
+using LogEntry=std::tuple<GameState, std::chrono::time_point<std::chrono::system_clock>>;
+std::vector<LogEntry> timeLogger;
+std::mutex stateMutex;
+std::atomic<bool> loggerRunning{false};
+
+
+//Threading function.
+void loggerThread(GameState* state){
+	using namespace std::chrono;
+	auto next=steady_clock::now();
+
+	while (loggerRunning){
+		next+=seconds(1);
+		{
+			std::lock_guard<std::mutex> lock(stateMutex);
+			timeLogger.emplace_back(*state,system_clock::now());
+		}
+		std::this_thread::sleep_until(next);
+		
+	}
+}
+
+
 
 
 
@@ -825,6 +849,11 @@ int main(int argc, char** argv) {
     state.screenTexture = LoadRenderTexture(SCREEN_WIDTH, SCREEN_HEIGHT);
     SetTextureWrap(state.screenTexture.texture, TEXTURE_WRAP_CLAMP);
 
+	#ifndef __EMSCRIPTEN__
+	loggerRunning=true;
+	std::thread logger(loggerThread,&state);
+	#endif
+
     #ifdef __EMSCRIPTEN__
     emscripten_set_main_loop_arg(mainLoop, &state, 0, true);
     #else
@@ -832,6 +861,11 @@ int main(int argc, char** argv) {
         mainLoop(&state);
     }
     #endif
+
+	#ifndef __EMSCRIPTEN__
+	loggerRunning=false;
+	logger.join();
+	#endif
 
     UnloadRenderTexture(state.screenTexture);
 
