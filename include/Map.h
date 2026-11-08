@@ -21,6 +21,13 @@ public:
     void Draw(Vector2 offset = {0.0f, 0.0f},
               bool showGrid = true) const;
 
+    // Draws only the tiles that overlap `view`, a rectangle in the same
+    // coordinate space as `offset` (i.e. world space). Use this with a camera
+    // so a big map doesn't draw thousands of off-screen tiles every frame.
+    void DrawView(Rectangle view,
+                  Vector2 offset = {0.0f, 0.0f},
+                  bool showGrid = false) const;
+
     void SetTile(int x, int y, int tileID);
     int GetTile(int x, int y) const;
     void Fill(int tileID);

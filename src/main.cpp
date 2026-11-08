@@ -6,6 +6,7 @@
 #include "lighting.h"
 #include "Map.h"
 #include "animated_sprite.h"
+
 #include <cstdint>
 #include <vector>
 #include <cmath>
@@ -14,12 +15,10 @@
 #include <string>
 #include <tuple>
 
-
 //Concurrency and monads, what could go wrong.
 #include <thread>
 #include <mutex>
 #include <chrono>
-
 #define SCREEN_WIDTH 240
 #define SCREEN_HEIGHT 240
 
@@ -28,11 +27,18 @@
 #define PLAYER_ACCELERATION 15
 #define PLAYER_LIGHT_SIZE 100
 
+// World size, in tiles. 120 x 120 tiles of 16px = 1920 x 1920 world pixels,
+// about 8 screens wide. Raise MAP_*_TILES for a bigger world.
+#define MAP_WIDTH_TILES 120
+#define MAP_HEIGHT_TILES 120
+#define TILE_SIZE 16
+
 enum ScreenState {
-	SCREEN_MENU,
+    SCREEN_MENU,
     SCREEN_SELECT,
     SCREEN_DIALOGUE,
-    SCREEN_GAME
+    SCREEN_GAME,
+    SCREEN_CHRONOS_CONFRONTATION
 };
 
 enum GameOverReason {
@@ -51,19 +57,53 @@ struct Collectible {
     bool collected;
 };
 
+struct Controller {
+	bool open=false;
+	Vector2 cursor={0.5f,0.5f};
+};
+
 struct Exit {
     Vector2 position;
     bool unlocked;
 };
 
+//The full description of a moment in the game.
 struct GameAssets {
     Shader crtShader;
 
     Texture players[2];
     Music bgm;
+    Sound chronosVoices[3];
+    Texture chronosPortrait;
 
     AnimatedSprite chronosSprite;
 };
+
+//Streamlined version that is used to optimise storage space.
+struct TimelineSnapShot{
+	int currentLoop;
+	float timeRemaining;
+
+	Player player;
+	Chronos chronos;
+	Collectible testItem;
+	Exit testExit;
+	Vector2 mapOrigin;
+}
+
+TimelineSnapShot extract(const GameState& l){
+	TimelineSnapShot t;
+	t.currentLoop=l.currentLoop;
+	t.timeRemaining=l.timeRemaining;
+	t.player=l.player;
+	t.chronos=l.chronos;
+	t.testItem=l.testItem;
+	t.testExit=l.testExit;
+	t.mapOrigin=l.mapOrigin;
+
+	return t;
+
+}
 
 struct GameState {
     ScreenState currentScreen;
@@ -74,6 +114,7 @@ struct GameState {
     Player player;
     Chronos chronos;
     TileMap islandMap;
+    Vector2 mapOrigin = {0.0f, 0.0f}; // world position of the map's top-left corner
     LightingMap lightingMap;
     Collectible testItem;
     Exit testExit;
@@ -88,10 +129,18 @@ struct GameState {
     float playerHitFlash = 0.0f;
     float playerShakeTimer = 0.0f;
 
+    // Chronos confrontation variables
+    int confrontationLineIndex = 0;
+    float typewriterTimer = 0.0f;
+    int displayedChars = 0;
+    bool voicePlayed = false;
+
     GameAssets assets;
 
     RenderTexture2D screenTexture;
 };
+
+
 
 Vector2 getGameMousePos() {
     Vector2 mousePos = GetMousePosition();
@@ -125,7 +174,6 @@ void drawTitle(const char* title){
 	int titleFontSize=30;
 	int titleWidth=MeasureText(title,titleFontSize);
 	DrawText(title,(SCREEN_WIDTH-titleWidth)/2,20,titleFontSize,DARKGRAY);
-
 }
 
 void draw_button(const char* title, Rectangle button,bool overHover){
@@ -133,7 +181,6 @@ void draw_button(const char* title, Rectangle button,bool overHover){
     DrawRectangleLines((int)button.x, (int)button.y, (int)button.width, (int)button.height, DARKGRAY);
     int playWidth = MeasureText(title, 20);
     DrawText(title, (int)(button.x + (button.width - playWidth) / 2), (int)(button.y + 15), 20, DARKGRAY);
-
 }
 
 //Concurrency MVP.
@@ -154,6 +201,7 @@ void loggerThread(GameState* state){
 		{
 			std::lock_guard<std::mutex> lock(stateMutex);
 			timeLogger.emplace_back(*state,system_clock::now());
+			
 		}
 		std::this_thread::sleep_until(next);
 		
@@ -164,21 +212,18 @@ void loggerThread(GameState* state){
 
 
 
-
-
 void menuLoop(void *data){
 	GameState* state = static_cast<GameState*>(data);
 	const Vector2 mousePos = getGameMousePos();
 
-	//Bounding boxes.
 	Rectangle playButton = { (SCREEN_WIDTH - 200) / 2.0f, (SCREEN_HEIGHT / 2.0f) - 40.0f, 200.0f, 50.0f };
     Rectangle creditsButton = { (SCREEN_WIDTH - 200) / 2.0f, (SCREEN_HEIGHT / 2.0f) + 20.0f, 200.0f, 50.0f };
 
 	bool playHovered = CheckCollisionPointRec(mousePos, playButton);
     bool creditsHovered = CheckCollisionPointRec(mousePos, creditsButton);
 
-    if (playHovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        state->currentScreen=SCREEN_SELECT;
+	if (playHovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+		state->currentScreen = SCREEN_SELECT;
     }
 	if (creditsHovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         // Trigger transition to credits state
@@ -373,9 +418,62 @@ void dialogueScreen(GameState* state) {
     }
 }
 
-void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
-    const Rectangle temporaryWall = {140.0f, 58.0f, 4.0f, 108.0f};
+// The playable area (the whole tile map) in world coordinates.
+Rectangle getWorldBounds(const GameState* state) {
+    return {
+        state->mapOrigin.x,
+        state->mapOrigin.y,
+        (float)(state->islandMap.GetWidth() * state->islandMap.GetWorldTileSize()),
+        (float)(state->islandMap.GetHeight() * state->islandMap.GetWorldTileSize())
+    };
+}
 
+// Keeps the player inside the map and stops them dead against the edge.
+void clampPlayerToWorld(GameState* state) {
+    const Rectangle bounds = getWorldBounds(state);
+    const float half = PLAYER_RECT_SIZE * 0.5f;
+    Player& p = state->player;
+
+    if (p.x < bounds.x + half)                { p.x = bounds.x + half;                p.velx = 0.0f; }
+    if (p.x > bounds.x + bounds.width - half) { p.x = bounds.x + bounds.width - half; p.velx = 0.0f; }
+    if (p.y < bounds.y + half)                { p.y = bounds.y + half;                p.vely = 0.0f; }
+    if (p.y > bounds.y + bounds.height - half){ p.y = bounds.y + bounds.height - half;p.vely = 0.0f; }
+}
+
+// Builds a big irregular island in the middle of the map. The coastline
+// radius wobbles with the angle so it isn't a perfect circle.
+void generateIsland(TileMap& map) {
+    const int centreX = map.GetWidth() / 2;
+    const int centreY = map.GetHeight() / 2;
+    const float baseRadius = std::min(map.GetWidth(), map.GetHeight()) * 0.32f;
+
+    map.Fill(14); // shallow water
+
+    for (int y = 0; y < map.GetHeight(); ++y) {
+        for (int x = 0; x < map.GetWidth(); ++x) {
+            const float dx = (float)(x - centreX);
+            const float dy = (float)(y - centreY);
+            const float distance = std::sqrt(dx * dx + dy * dy);
+            const float angle = std::atan2(dy, dx);
+
+            const float wobble = 1.0f
+                + 0.10f * std::sin(angle * 3.0f + 1.3f)
+                + 0.06f * std::sin(angle * 5.0f + 4.1f)
+                + 0.04f * std::sin(angle * 9.0f + 2.2f);
+            const float shoreRadius = baseRadius * wobble;
+
+            if (distance <= shoreRadius) {
+                map.SetTile(x, y, 5 + (x + y) % 3);        // grass variants
+            } else if (distance <= shoreRadius + 2.5f) {
+                map.SetTile(x, y, (x + y) % 3);            // sand variants
+            }
+        }
+    }
+}
+
+void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
+    // Temporary wall used for collision testing until map obstacle data is wired in.
+    const Rectangle temporaryWall = { 140.0f, 58.0f, 4.0f, 108.0f };
     if (state->gameOver && IsKeyPressed(KEY_R)) {
         state->currentLoop = 1;
         state->timeRemaining = 60.0f;
@@ -435,9 +533,11 @@ void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
         updateChronos(state->chronos, deltaTime, state->chronosDangerous);
     }
 
+    // The camera keeps the player at the centre of the screen, and mousePos is
+    // in screen space, so the aim angle is measured from the screen centre.
     float playerMouseAngle = std::atan2(
-        mousePos.y - state->player.y,
-        mousePos.x - state->player.x
+        mousePos.y - SCREEN_HEIGHT / 2.0f,
+        mousePos.x - SCREEN_WIDTH / 2.0f
     );
 
     if (!state->gameOver && !state->victory) {
@@ -458,13 +558,16 @@ void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
         );
 
         const float halfPlayer = PLAYER_RECT_SIZE * 0.5f;
+        const Rectangle worldBounds = getWorldBounds(state);
         const float nextX = std::clamp(
             state->player.x + state->player.velx * deltaTime,
-            halfPlayer, SCREEN_WIDTH - halfPlayer
+            worldBounds.x + halfPlayer,
+            worldBounds.x + worldBounds.width - halfPlayer
         );
         const float nextY = std::clamp(
             state->player.y + state->player.vely * deltaTime,
-            halfPlayer, SCREEN_HEIGHT - halfPlayer
+            worldBounds.y + halfPlayer,
+            worldBounds.y + worldBounds.height - halfPlayer
         );
 
         const Rectangle nextXBounds = {
@@ -512,12 +615,56 @@ void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
                 const float safeDistance = std::max(distance, 0.001f);
                 const float pushX = dx / safeDistance;
                 const float pushY = dy / safeDistance;
-                state->player.x += pushX * 30.0f;
-                state->player.y += pushY * 30.0f;
-                state->player.velx = pushX * 80.0f;
-                state->player.vely = pushY * 80.0f;
-                state->player.x = std::clamp(state->player.x, 8.0f, SCREEN_WIDTH - 8.0f);
-                state->player.y = std::clamp(state->player.y, 8.0f, SCREEN_HEIGHT - 8.0f);
+                const float halfPlayer = PLAYER_RECT_SIZE * 0.5f;
+                const float knockbackX = pushX * 30.0f;
+                const float knockbackY = pushY * 30.0f;
+                const auto makesPlayerBounds = [halfPlayer](float x, float y) {
+                    return Rectangle{
+                        x - halfPlayer,
+                        y - halfPlayer,
+                        PLAYER_RECT_SIZE,
+                        PLAYER_RECT_SIZE
+                    };
+                };
+
+                const Rectangle worldBounds = getWorldBounds(state);
+                const float minX = worldBounds.x + halfPlayer;
+                const float maxX = worldBounds.x + worldBounds.width - halfPlayer;
+                const float minY = worldBounds.y + halfPlayer;
+                const float maxY = worldBounds.y + worldBounds.height - halfPlayer;
+                const float fullX = std::clamp(state->player.x + knockbackX, minX, maxX);
+                const float fullY = std::clamp(state->player.y + knockbackY, minY, maxY);
+
+                if (!CheckCollisionRecs(makesPlayerBounds(fullX, fullY), temporaryWall)) {
+                    state->player.x = fullX;
+                    state->player.y = fullY;
+                    state->player.velx = pushX * 80.0f;
+                    state->player.vely = pushY * 80.0f;
+                } else {
+                    const float xOnly = std::clamp(state->player.x + knockbackX, minX, maxX);
+                    const float yOnly = std::clamp(state->player.y + knockbackY, minY, maxY);
+                    const bool canMoveX = !CheckCollisionRecs(
+                        makesPlayerBounds(xOnly, state->player.y), temporaryWall
+                    );
+                    const bool canMoveY = !CheckCollisionRecs(
+                        makesPlayerBounds(state->player.x, yOnly), temporaryWall
+                    );
+
+                    if (canMoveX) {
+                        state->player.x = xOnly;
+                        state->player.velx = pushX * 80.0f;
+                    } else {
+                        state->player.velx = 0.0f;
+                    }
+
+                    if (canMoveY) {
+                        state->player.y = yOnly;
+                        state->player.vely = pushY * 80.0f;
+                    } else {
+                        state->player.vely = 0.0f;
+                    }
+                }
+
                 state->playerHitFlash = 0.25f;
                 state->playerShakeTimer = 0.35f;
             }
@@ -543,30 +690,47 @@ void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
         const float distance = std::sqrt(dx * dx + dy * dy);
 
         if (distance <= 18.0f) {
-            state->victory = true;
+            StopMusicStream(state->assets.bgm);
+
+            state->currentScreen = SCREEN_CHRONOS_CONFRONTATION;
+            state->confrontationLineIndex = 0;
+            state->displayedChars = 0;
+            state->typewriterTimer = 0.0f;
+            state->voicePlayed = false;
         }
     }
 
+    // Camera: its target is the player and its offset is the screen centre, so
+    // the player never moves on screen, the world scrolls past instead.
+    // Rounding the target keeps pixel art on whole pixels (no shimmering).
+    Camera2D camera = {};
+    camera.offset = { SCREEN_WIDTH / 2.0f, SCREEN_HEIGHT / 2.0f };
+    camera.target = { std::round(state->player.x), std::round(state->player.y) };
+    camera.rotation = 0.0f;
+    camera.zoom = 1.0f;
+
+    // The part of the world currently on screen, used to skip off-screen tiles.
+    const Rectangle view = {
+        camera.target.x - camera.offset.x,
+        camera.target.y - camera.offset.y,
+        (float)SCREEN_WIDTH,
+        (float)SCREEN_HEIGHT
+    };
+
     ClearBackground(Color{20, 20, 24, 255});
-    state->islandMap.Draw({0.0f, 0.0f}, false);
+
+    BeginMode2D(camera);
+
+    state->islandMap.DrawView(view, state->mapOrigin, false);
 
     // Temporary occlusion-test wall; replace with the map's obstacle data later.
-    DrawRectangleRec(temporaryWall, DARKGRAY);
+    DrawRectangle(140, 58, 4, 108, DARKGRAY);
 
     Color chronosColor = DARKGRAY;
-
     if (state->chronosDangerous &&
         static_cast<int>(GetTime() * 4.0) % 2 == 0) {
         chronosColor = RED;
     }
-
-    // DrawCircleV(
-    //     state->chronos.position,
-    //     8.0f,
-    //     chronosColor
-    // );
-
-    // draw chronos
 
     state->assets.chronosSprite.updateFrame(deltaTime);
     DrawTexturePro(
@@ -600,30 +764,35 @@ void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
     DrawTexturePro(
         state->assets.players[state->selectedCharacter],
         {0, 0, (float)PLAYER_RECT_SIZE, (float)PLAYER_RECT_SIZE},
-        {state->player.x + shakeX, state->player.y + shakeY,
+        {camera.target.x + shakeX, camera.target.y + shakeY,
             (float)PLAYER_RECT_SIZE, (float)PLAYER_RECT_SIZE},
         {PLAYER_RECT_SIZE / 2.0f, PLAYER_RECT_SIZE / 2.0f},
         playerMouseAngle * RAD2DEG,
         state->playerHitFlash > 0.0f ? ORANGE : WHITE
     );
 
+    EndMode2D();
+
+    // LightingMap works in map-local coordinates (0,0 = the map's top-left
+    // corner), so subtract mapOrigin from every world position we give it.
+    // It draws in screen space, so this call stays outside BeginMode2D.
+    const int originX = (int)state->mapOrigin.x;
+    const int originY = (int)state->mapOrigin.y;
+
     const std::vector<LightSource> lightSources{
         LightSource{
-            static_cast<int>(state->player.x),
-            static_cast<int>(state->player.y),
+            (int)camera.target.x - originX,
+            (int)camera.target.y - originY,
             PLAYER_LIGHT_SIZE / 2
         }
     };
     state->lightingMap.calcAndDrawLights(
-        lightSources, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT
+        lightSources,
+        (int)view.x - originX, (int)view.y - originY,   // top-left of the screen, map-local
+        SCREEN_WIDTH, SCREEN_HEIGHT
     );
-    DrawText(
-        state->testItem.collected ? "Item: 1/1" : "Item: 0/1",
-        8,
-        8,
-        10,
-        RAYWHITE
-    );
+    // Item and exit live in the world, so they go through the camera too.
+    BeginMode2D(camera);
 
     if (!state->testItem.collected) {
         DrawRectangle(
@@ -642,6 +811,34 @@ void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
         12,
         state->testExit.unlocked ? GREEN : DARKGRAY
     );
+
+    EndMode2D();
+
+    // HUD (screen space)
+    DrawText(
+        state->testItem.collected ? "Item: 1/1" : "Item: 0/1",
+        8,
+        8,
+        10,
+        RAYWHITE
+    );
+
+    if (!state->gameOver && !state->victory) {
+        const float itemDx = state->player.x - state->testItem.position.x;
+        const float itemDy = state->player.y - state->testItem.position.y;
+        const float itemDistance = std::sqrt(itemDx * itemDx + itemDy * itemDy);
+        const float exitDx = state->player.x - state->testExit.position.x;
+        const float exitDy = state->player.y - state->testExit.position.y;
+        const float exitDistance = std::sqrt(exitDx * exitDx + exitDy * exitDy);
+
+        if (!state->testItem.collected && itemDistance <= 28.0f) {
+            DrawText("Press E to collect", 62, 190, 10, GOLD);
+        } else if (state->testItem.collected && exitDistance <= 30.0f) {
+            DrawText("Press E to escape", 68, 190, 10, GREEN);
+        } else if (!state->testExit.unlocked && exitDistance <= 30.0f) {
+            DrawText("Find the item first", 64, 190, 10, LIGHTGRAY);
+        }
+    }
 
     if (state->victory) {
         DrawRectangle(30, 82, SCREEN_WIDTH - 60, 76, Color{10, 30, 18, 235});
@@ -688,11 +885,112 @@ void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
     DrawText(loopText.c_str(), 8, 22, 10, RAYWHITE);
 }
 
+void chronosConfrontationScreen(GameState* state, float deltaTime) {
+    const char* lines[] = {
+        "How dare you... How dare a fleeting, microscopic speck defy the grand design of the ages!",
+        " I am the beginning and the end, yet you treat my absolute authority like a trivial hurdle?!",
+        "I will age your very soul to ash!"
+    };
+    const int totalLines = 3;
+
+    if (!state->voicePlayed && IsAudioDeviceReady()) {
+        if (state->confrontationLineIndex >= 0 && state->confrontationLineIndex < totalLines) {
+            PlaySound(state->assets.chronosVoices[state->confrontationLineIndex]);
+        }
+        state->voicePlayed = true;
+    }
+
+    const float charsPerSecond = 35.0f;
+    if (state->confrontationLineIndex < totalLines) {
+        std::string currentLine = lines[state->confrontationLineIndex];
+        if (state->displayedChars < (int)currentLine.length()) {
+            state->typewriterTimer += deltaTime;
+            if (state->typewriterTimer >= (1.0f / charsPerSecond)) {
+                state->displayedChars++;
+                state->typewriterTimer = 0.0f;
+            }
+        }
+    }
+
+    if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        if (state->confrontationLineIndex < totalLines) {
+            std::string currentLine = lines[state->confrontationLineIndex];
+            if (state->displayedChars < (int)currentLine.length()) {
+                state->displayedChars = currentLine.length();
+            } else {
+                if (IsSoundPlaying(state->assets.chronosVoices[state->confrontationLineIndex])) {
+                    StopSound(state->assets.chronosVoices[state->confrontationLineIndex]);
+                }
+
+                state->confrontationLineIndex++;
+                state->displayedChars = 0;
+                state->typewriterTimer = 0.0f;
+                state->voicePlayed = false;
+
+                if (state->confrontationLineIndex >= totalLines) {
+                    state->victory = true;
+                    state->currentScreen = SCREEN_GAME;
+                }
+            }
+        }
+    }
+
+    ClearBackground(Color{ 10, 10, 15, 255 });
+
+    if (state->assets.chronosPortrait.id != 0) {
+        DrawTexturePro(
+            state->assets.chronosPortrait,
+            { 0, 0, (float)state->assets.chronosPortrait.width, (float)state->assets.chronosPortrait.height },
+            { -10.0f, SCREEN_HEIGHT - 175.0f, 110.0f, 130.0f },
+            { 0, 0 }, 0.0f, WHITE
+        );
+    }
+
+    DrawRectangle(10, 145, SCREEN_WIDTH - 20, 85, Color{ 15, 15, 20, 240 });
+    DrawRectangleLines(10, 145, SCREEN_WIDTH - 20, 85, RED);
+
+    DrawRectangle(20, 135, 60, 16, BLACK);
+    DrawRectangleLines(20, 135, 60, 16, RED);
+    DrawText("CHRONOS", 24, 139, 8, RED);
+
+    if (state->confrontationLineIndex < totalLines) {
+        std::string fullLine = lines[state->confrontationLineIndex];
+        std::string subText = fullLine.substr(0, state->displayedChars);
+
+        int maxCharsPerLine = 34;
+        std::string line1 = "";
+        std::string line2 = "";
+        std::string line3 = "";
+
+        if (subText.length() > maxCharsPerLine) {
+            line1 = subText.substr(0, maxCharsPerLine);
+            if (subText.length() > maxCharsPerLine * 2) {
+                line2 = subText.substr(maxCharsPerLine, maxCharsPerLine);
+                line3 = subText.substr(maxCharsPerLine * 2);
+            } else {
+                line2 = subText.substr(maxCharsPerLine);
+            }
+        } else {
+            line1 = subText;
+        }
+        
+        DrawText(line1.c_str(), 20, 155, 8, RAYWHITE);
+        DrawText(line2.c_str(), 20, 167, 8, RAYWHITE);
+        DrawText(line3.c_str(), 20, 179, 8, RAYWHITE);
+    }
+
+    if (static_cast<int>(GetTime() * 3.0) % 2 == 0) {
+        DrawText("[CLICK / ENTER]", SCREEN_WIDTH - 90, 220, 6, RED);
+    }
+}
+
 void mainLoop(void* data) {
     GameState* state = (GameState*)data;
     if (IsAudioDeviceReady() && !IsMusicStreamPlaying(state->assets.bgm)) {
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || GetKeyPressed() != 0) {
-            PlayMusicStream(state->assets.bgm);
+        if (state->currentScreen != SCREEN_CHRONOS_CONFRONTATION) {
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || GetKeyPressed() != 0) {
+                PlayMusicStream(state->assets.bgm);
+            }
         }
     }
 
@@ -711,6 +1009,8 @@ void mainLoop(void* data) {
             dialogueScreen(state);
         } else if (state->currentScreen == SCREEN_GAME) {
             gameScreen(state, gameMousePos, deltaTime);
+        } else if (state->currentScreen == SCREEN_CHRONOS_CONFRONTATION) {
+            chronosConfrontationScreen(state, deltaTime);
         }
     EndTextureMode();
 
@@ -768,6 +1068,10 @@ GameAssets loadAssets() {
 
     assets.players[0] = LoadTexture("assets/player_jamie.png");
     assets.players[1] = LoadTexture("assets/player_carol.png");
+    assets.chronosPortrait = LoadTexture("assets/chronos-anim1.png"); 
+    assets.chronosVoices[0] = LoadSound("assets/PartOne.mp3");
+    assets.chronosVoices[1] = LoadSound("assets/PartTwo.mp3");
+    assets.chronosVoices[2] = LoadSound("assets/PartThree.mp3");
 
     assets.bgm = LoadMusicStream("assets/oooscary.mp3");
     assets.bgm.looping = true;
@@ -793,6 +1097,10 @@ void unloadAssets(GameAssets& assets) {
 
     UnloadTexture(assets.players[0]);
     UnloadTexture(assets.players[1]);
+    UnloadTexture(assets.chronosPortrait);
+    UnloadSound(assets.chronosVoices[0]);
+    UnloadSound(assets.chronosVoices[1]);
+    UnloadSound(assets.chronosVoices[2]);
 
     UnloadMusicStream(assets.bgm);
 
@@ -820,29 +1128,32 @@ int main(int argc, char** argv) {
     state.testExit.position = {200.0f, 80.0f};
     state.testExit.unlocked = false;
 
-    state.islandMap = TileMap(15, 15, 16, 16);
+    state.islandMap = TileMap(MAP_WIDTH_TILES, MAP_HEIGHT_TILES, TILE_SIZE, TILE_SIZE);
     state.islandMap.LoadTileset(
         "assets/TIles/Pixel_Beach_Island_Tileset_v1/spritesheet.png"
     );
-    state.islandMap.Fill(14); // shallow water
-    for (int y = 0; y < state.islandMap.GetHeight(); ++y) {
-        for (int x = 0; x < state.islandMap.GetWidth(); ++x) {
-            const int dx = x - state.islandMap.GetWidth() / 2;
-            const int dy = y - state.islandMap.GetHeight() / 2;
-            const int distanceSquared = dx * dx + dy * dy;
+    generateIsland(state.islandMap);
 
-            if (distanceSquared <= 25) {
-                state.islandMap.SetTile(x, y, 5 + (x + y) % 3); // grass variants
-            } else if (distanceSquared <= 36) {
-                state.islandMap.SetTile(x, y, (x + y) % 3); // sand variants
-            }
-        }
-    }
+    // Place the map so its centre tile sits where the old 15x15 island's centre
+    // was, (120, 120). The spawn point, item, exit, Chronos waypoints and test
+    // wall all keep their coordinates. The map just extends into negative
+    // coordinates, which is fine in a camera-driven world.
+    state.mapOrigin = {
+        SCREEN_WIDTH / 2.0f - (MAP_WIDTH_TILES / 2) * TILE_SIZE - TILE_SIZE / 2.0f,
+        SCREEN_HEIGHT / 2.0f - (MAP_HEIGHT_TILES / 2) * TILE_SIZE - TILE_SIZE / 2.0f
+    };
 
-    state.lightingMap = LightingMap(SCREEN_WIDTH, SCREEN_HEIGHT);
+    // One lighting cell per world pixel, covering the whole map. Obstacles use
+    // map-local coordinates, so the test wall (world 140,58 to 143,165) is
+    // shifted by mapOrigin.
+    state.lightingMap = LightingMap(
+        MAP_WIDTH_TILES * TILE_SIZE, MAP_HEIGHT_TILES * TILE_SIZE
+    );
     for (int y = 58; y < 166; ++y) {
         for (int x = 140; x < 144; ++x) {
-            state.lightingMap.setObstacle(x, y, 1);
+            state.lightingMap.setObstacle(
+                x - (int)state.mapOrigin.x, y - (int)state.mapOrigin.y, 1
+            );
         }
     }
 

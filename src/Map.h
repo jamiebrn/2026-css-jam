@@ -21,6 +21,11 @@ public:
     void Draw(Vector2 offset = {0.0f, 0.0f},
               bool showGrid = true) const;
 
+    // Draws only the tiles that overlap `view` in world space.
+    void DrawView(Rectangle view,
+                  Vector2 offset = {0.0f, 0.0f},
+                  bool showGrid = false) const;
+
     void SetTile(int x, int y, int tileID);
     int GetTile(int x, int y) const;
     void Fill(int tileID);

@@ -1,5 +1,7 @@
 #include "Map.h"
 
+#include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <iostream>
 
@@ -75,9 +77,36 @@ void TileMap::Fill(int tileID) {
 }
 
 void TileMap::Draw(Vector2 offset, bool showGrid) const {
-    // Draw a dark checkerboard underneath empty cells.
-    for (int y = 0; y < mapHeight; ++y) {
-        for (int x = 0; x < mapWidth; ++x) {
+    const Rectangle wholeMap = {
+        offset.x,
+        offset.y,
+        static_cast<float>(mapWidth * worldTileSize),
+        static_cast<float>(mapHeight * worldTileSize)
+    };
+
+    DrawView(wholeMap, offset, showGrid);
+}
+
+void TileMap::DrawView(Rectangle view, Vector2 offset, bool showGrid) const {
+    // Turn the visible rectangle into a range of tile coordinates, clamped to
+    // the map, so only tiles that can actually be seen are drawn.
+    const int firstX = std::max(
+        0, static_cast<int>(std::floor((view.x - offset.x) / worldTileSize)));
+    const int firstY = std::max(
+        0, static_cast<int>(std::floor((view.y - offset.y) / worldTileSize)));
+    const int lastX = std::min(
+        mapWidth - 1,
+        static_cast<int>(std::floor((view.x + view.width - offset.x) / worldTileSize)));
+    const int lastY = std::min(
+        mapHeight - 1,
+        static_cast<int>(std::floor((view.y + view.height - offset.y) / worldTileSize)));
+
+    if (firstX > lastX || firstY > lastY) {
+        return;
+    }
+
+    for (int y = firstY; y <= lastY; ++y) {
+        for (int x = firstX; x <= lastX; ++x) {
             const Rectangle destination = {
                 offset.x + x * worldTileSize,
                 offset.y + y * worldTileSize,
@@ -127,26 +156,20 @@ void TileMap::Draw(Vector2 offset, bool showGrid) const {
     if (showGrid) {
         const Color gridColour{5, 8, 15, 100};
 
-        for (int x = 0; x <= mapWidth; ++x) {
-            const float screenX = offset.x + x * worldTileSize;
-            DrawLine(
-                static_cast<int>(screenX),
-                static_cast<int>(offset.y),
-                static_cast<int>(screenX),
-                static_cast<int>(offset.y + mapHeight * worldTileSize),
-                gridColour
-            );
+        // Grid lines only span the visible block of tiles.
+        const int left   = static_cast<int>(offset.x + firstX * worldTileSize);
+        const int right  = static_cast<int>(offset.x + (lastX + 1) * worldTileSize);
+        const int top    = static_cast<int>(offset.y + firstY * worldTileSize);
+        const int bottom = static_cast<int>(offset.y + (lastY + 1) * worldTileSize);
+
+        for (int x = firstX; x <= lastX + 1; ++x) {
+            const int screenX = static_cast<int>(offset.x + x * worldTileSize);
+            DrawLine(screenX, top, screenX, bottom, gridColour);
         }
 
-        for (int y = 0; y <= mapHeight; ++y) {
-            const float screenY = offset.y + y * worldTileSize;
-            DrawLine(
-                static_cast<int>(offset.x),
-                static_cast<int>(screenY),
-                static_cast<int>(offset.x + mapWidth * worldTileSize),
-                static_cast<int>(screenY),
-                gridColour
-            );
+        for (int y = firstY; y <= lastY + 1; ++y) {
+            const int screenY = static_cast<int>(offset.y + y * worldTileSize);
+            DrawLine(left, screenY, right, screenY, gridColour);
         }
     }
 }
