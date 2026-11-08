@@ -1,0 +1,19 @@
+#pragma once
+
+// The island map as text. The rows themselves live in island_layout.cpp.
+// One character per tile:
+//   ~ deep water   , shallow water   s sand        c cliff       g grass
+//   f dark grass   T tree            p dirt path   k rock        M mountain
+//   o stone floor  q mossy cobble    W stone wall  S stairs      E door / cave mouth
+//   l torch/candle r rune / portal   i pillar      b wooden dock B boat
+//   x plane wreck  d debris
+
+constexpr int ISLAND_WIDTH = 160;
+constexpr int ISLAND_HEIGHT = 110;
+
+// Tile where the player starts (the plane crash site).
+constexpr int ISLAND_SPAWN_X = 40;
+constexpr int ISLAND_SPAWN_Y = 46;
+
+// ISLAND_LAYOUT[y][x] is the terrain character for the tile at column x, row y.
+extern const char* const ISLAND_LAYOUT[ISLAND_HEIGHT];

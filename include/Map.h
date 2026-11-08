@@ -16,6 +16,13 @@ public:
             int worldTileSize = 32);
 
     bool LoadTileset(const std::string& imagePath);
+
+    // Builds a tileset in code: one flat-colour tile per entry, in one row.
+    // Tile ID n is colours[n]. For testing a layout before the real art exists.
+    bool LoadPlaceholderTileset(const std::vector<Color>& colours);
+
+    // Colour multiplied over every tile when drawing (WHITE = unchanged).
+    void SetTint(Color newTint) { tilesetTint = newTint; }
     void Unload();
 
     void Draw(Vector2 offset = {0.0f, 0.0f},
@@ -53,6 +60,7 @@ private:
     int tilesetColumns = 0;
 
     Texture2D tileset{};
+    Color tilesetTint{70, 85, 80, 255};
     bool tilesetLoaded = false;
     std::vector<int> cells;
 

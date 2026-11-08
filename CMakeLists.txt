@@ -22,9 +22,7 @@ include_directories(include/)
 include_directories(extlib/)
 
 file(GLOB_RECURSE SRC_FILES src/*.cpp)
-file(GLOB_RECURSE EXT_SRC_FILES extlib/*.c)
-file(GLOB_RECURSE EXT_SRC_FILES extlib/*.cpp)
-
+file(GLOB_RECURSE EXT_SRC_FILES extlib/*.c extlib/*.cpp)
 add_executable(game ${SRC_FILES} ${EXT_SRC_FILES})
 
 if(EMSCRIPTEN)

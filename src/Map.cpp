@@ -44,6 +44,47 @@ bool TileMap::LoadTileset(const std::string& imagePath) {
     return true;
 }
 
+bool TileMap::LoadPlaceholderTileset(const std::vector<Color>& colours) {
+    if (colours.empty()) {
+        return false;
+    }
+
+    if (tilesetLoaded) {
+        UnloadTexture(tileset);
+        tilesetLoaded = false;
+    }
+
+    const int count = static_cast<int>(colours.size());
+    Image image = GenImageColor(count * sourceTileSize, sourceTileSize, BLANK);
+
+    for (int i = 0; i < count; ++i) {
+        ImageDrawRectangle(&image, i * sourceTileSize, 0,
+                           sourceTileSize, sourceTileSize, colours[i]);
+
+        // A faint edge on each tile so individual tiles can be told apart.
+        const Color edge = {
+            static_cast<unsigned char>(colours[i].r * 8 / 10),
+            static_cast<unsigned char>(colours[i].g * 8 / 10),
+            static_cast<unsigned char>(colours[i].b * 8 / 10),
+            255
+        };
+        ImageDrawRectangle(&image, i * sourceTileSize, 0, sourceTileSize, 1, edge);
+        ImageDrawRectangle(&image, i * sourceTileSize, 0, 1, sourceTileSize, edge);
+    }
+
+    tileset = LoadTextureFromImage(image);
+    UnloadImage(image);
+
+    if (tileset.id == 0) {
+        std::cerr << "Could not create placeholder tileset.\n";
+        return false;
+    }
+
+    tilesetLoaded = true;
+    tilesetColumns = count;
+    return true;
+}
+
 void TileMap::Unload() {
     if (tilesetLoaded) {
         UnloadTexture(tileset);
@@ -148,7 +189,7 @@ void TileMap::DrawView(Rectangle view, Vector2 offset, bool showGrid) const {
                 destination,
                 {0.0f, 0.0f},
                 0.0f,
-                {70, 85, 80, 255}
+                tilesetTint
             );
         }
     }
