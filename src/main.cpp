@@ -5,8 +5,6 @@
 #include "chronos.h"
 #include "lighting.h"
 #include "Map.h"
-#include "IslandLayout.h"
-#include "IslandTiles.h"
 #include "animated_sprite.h"
 
 #include <cstdint>
@@ -22,11 +20,10 @@
 #define PLAYER_ACCELERATION 15
 #define PLAYER_LIGHT_SIZE 100
 
-// World size, in tiles. 128 x 88 tiles of 16px = 2048 x 1408 world pixels,
-// about 8.5 x 6 screens. The island layout is generated to fit whatever size
-// is set here (it matches the 3:2 shape of the concept map).
-#define MAP_WIDTH_TILES 128
-#define MAP_HEIGHT_TILES 88
+// World size, in tiles. 120 x 120 tiles of 16px = 1920 x 1920 world pixels,
+// about 8 screens wide. Raise MAP_*_TILES for a bigger world.
+#define MAP_WIDTH_TILES 120
+#define MAP_HEIGHT_TILES 120
 #define TILE_SIZE 16
 
 enum ScreenState {
@@ -75,7 +72,6 @@ struct GameState {
     Player player;
     Chronos chronos;
     TileMap islandMap;
-    IslandLayout islandLayout;
     Vector2 mapOrigin = {0.0f, 0.0f}; // world position of the map's top-left corner
     LightingMap lightingMap;
     Collectible testItem;
@@ -368,6 +364,37 @@ void clampPlayerToWorld(GameState* state) {
     if (p.x > bounds.x + bounds.width - half) { p.x = bounds.x + bounds.width - half; p.velx = 0.0f; }
     if (p.y < bounds.y + half)                { p.y = bounds.y + half;                p.vely = 0.0f; }
     if (p.y > bounds.y + bounds.height - half){ p.y = bounds.y + bounds.height - half;p.vely = 0.0f; }
+}
+
+// Builds a big irregular island in the middle of the map. The coastline
+// radius wobbles with the angle so it isn't a perfect circle.
+void generateIsland(TileMap& map) {
+    const int centreX = map.GetWidth() / 2;
+    const int centreY = map.GetHeight() / 2;
+    const float baseRadius = std::min(map.GetWidth(), map.GetHeight()) * 0.32f;
+
+    map.Fill(14); // shallow water
+
+    for (int y = 0; y < map.GetHeight(); ++y) {
+        for (int x = 0; x < map.GetWidth(); ++x) {
+            const float dx = (float)(x - centreX);
+            const float dy = (float)(y - centreY);
+            const float distance = std::sqrt(dx * dx + dy * dy);
+            const float angle = std::atan2(dy, dx);
+
+            const float wobble = 1.0f
+                + 0.10f * std::sin(angle * 3.0f + 1.3f)
+                + 0.06f * std::sin(angle * 5.0f + 4.1f)
+                + 0.04f * std::sin(angle * 9.0f + 2.2f);
+            const float shoreRadius = baseRadius * wobble;
+
+            if (distance <= shoreRadius) {
+                map.SetTile(x, y, 5 + (x + y) % 3);        // grass variants
+            } else if (distance <= shoreRadius + 2.5f) {
+                map.SetTile(x, y, (x + y) % 3);            // sand variants
+            }
+        }
+    }
 }
 
 void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
@@ -831,18 +858,15 @@ int main(int argc, char** argv) {
     state.islandMap.LoadTileset(
         "assets/TIles/Pixel_Beach_Island_Tileset_v1/spritesheet.png"
     );
+    generateIsland(state.islandMap);
 
-    // Build the island and paint it into the (single-layer) tile map.
-    state.islandLayout = GenerateIslandLayout(MAP_WIDTH_TILES, MAP_HEIGHT_TILES);
-    ApplyIslandLayout(state.islandMap, state.islandLayout, DefaultIslandTileSet());
-
-    // Place the map so the spawn tile (inside the plane crash site) sits at
-    // world (120, 120). The player spawn, item, exit, Chronos waypoints and
-    // test wall all keep their coordinates; the map just extends into negative
+    // Place the map so its centre tile sits where the old 15x15 island's centre
+    // was, (120, 120). The spawn point, item, exit, Chronos waypoints and test
+    // wall all keep their coordinates. The map just extends into negative
     // coordinates, which is fine in a camera-driven world.
     state.mapOrigin = {
-        SCREEN_WIDTH / 2.0f - (state.islandLayout.spawn.x + 0.5f) * TILE_SIZE,
-        SCREEN_HEIGHT / 2.0f - (state.islandLayout.spawn.y + 0.5f) * TILE_SIZE
+        SCREEN_WIDTH / 2.0f - (MAP_WIDTH_TILES / 2) * TILE_SIZE - TILE_SIZE / 2.0f,
+        SCREEN_HEIGHT / 2.0f - (MAP_HEIGHT_TILES / 2) * TILE_SIZE - TILE_SIZE / 2.0f
     };
 
     // One lighting cell per world pixel, covering the whole map. Obstacles use
