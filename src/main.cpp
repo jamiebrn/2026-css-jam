@@ -57,6 +57,18 @@ void drawTitle(const char* title){
 	DrawText(title,(SCREEN_WIDTH-titleWidth)/2,20,titleFontSize,DARKGRAY);
 }
 
+TimeShot extract(const GameState& l){
+    TimeShot t;
+    t.currentLoop=l.currentLoop;
+    t.timeRemaining=l.timeRemaining;
+    t.player=l.player;
+    t.chronos=l.chronos;
+    t.testExit=l.testExit;
+    t.mapOrigin=l.mapOrigin;
+
+    return t;
+}
+
 void draw_button(const char* title, Rectangle button,bool overHover){
 	DrawRectangleRec(button, overHover ? LIGHTGRAY : WHITE);
     DrawRectangleLines((int)button.x, (int)button.y, (int)button.width, (int)button.height, DARKGRAY);
@@ -64,12 +76,85 @@ void draw_button(const char* title, Rectangle button,bool overHover){
     DrawText(title, (int)(button.x + (button.width - playWidth) / 2), (int)(button.y + 15), 20, DARKGRAY);
 }
 
+void drawController(GameState* state,Vector2 mouse,float dt){
+	Controller& c=state->controller;
+
+	//Layout.
+    const Rectangle body   = { 8, 62, 224, 132 };
+    const Rectangle screen = { 18, 74, 124, 84 };
+    const float cx = 188, cy = 128, s = 18, gap = 20;
+
+    const Rectangle up    = { cx - s/2,       cy - s/2 - gap, s, s };
+    const Rectangle down  = { cx - s/2,       cy - s/2 + gap, s, s };
+    const Rectangle left  = { cx - s/2 - gap, cy - s/2,       s, s };
+    const Rectangle right = { cx - s/2 + gap, cy - s/2,       s, s };
+    const Rectangle mid   = { cx - s/2,       cy - s/2,       s, s };
+
+    auto held = [&](int key, Rectangle r) {
+        return IsKeyDown(key) ||
+               (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, r));
+    };
+    const float speed = 0.6f * dt;
+    if (held(KEY_UP, up))       c.cursor.y -= speed;
+    if (held(KEY_DOWN, down))   c.cursor.y += speed;
+    if (held(KEY_LEFT, left))   c.cursor.x -= speed;
+    if (held(KEY_RIGHT, right)) c.cursor.x += speed;
+    c.cursor.x = std::clamp(c.cursor.x, 0.0f, 1.0f);
+    c.cursor.y = std::clamp(c.cursor.y, 0.0f, 1.0f);
+
+
+    DrawRectangle(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, Color{ 0, 0, 0, 150 });
+
+    DrawRectangleRounded({ body.x - 2, body.y - 2, body.width + 4, body.height + 4 },
+                         0.15f, 6, BLACK);
+    DrawRectangleRounded(body, 0.15f, 6, Color{ 52, 56, 60, 255 });
+
+    // screen
+    DrawRectangleRec({ screen.x - 2, screen.y - 2, screen.width + 4, screen.height + 4 }, BLACK);
+    DrawRectangleRec(screen, Color{ 18, 34, 22, 255 });
+
+	    auto P = [&](float u, float v) {
+        return Vector2{ screen.x + u * screen.width, screen.y + v * screen.height };
+    };
+    const Color road = Color{ 0x23, 0x7b, 0x52, 255 };
+    auto seg = [&](float u1, float v1, float u2, float v2) {
+        DrawLineEx(P(u1, v1), P(u2, v2), 1.0f, road);
+    };
+
+    if (static_cast<int>(GetTime() * 3.0) % 2 == 0) {
+        Vector2 p = P(state->player.x / SCREEN_WIDTH, state->player.y / SCREEN_HEIGHT);
+        DrawCircleV(p, 2.0f, GREEN);
+    }
+
+    // cursor crosshair
+    Vector2 k = P(c.cursor.x, c.cursor.y);
+    DrawLineEx({ k.x - 4, k.y }, { k.x + 4, k.y }, 1.0f, RAYWHITE);
+    DrawLineEx({ k.x, k.y - 4 }, { k.x, k.y + 4 }, 1.0f, RAYWHITE);
+
+    auto button = [&](Rectangle r, const char* label) {
+        bool hot = CheckCollisionPointRec(mouse, r) && IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+        DrawRectangleRec(r, hot ? Color{ 90, 96, 100, 255 } : Color{ 30, 33, 36, 255 });
+        DrawRectangleLines((int)r.x, (int)r.y, (int)r.width, (int)r.height, LIGHTGRAY);
+        int w = MeasureText(label, 8);
+        DrawText(label, (int)(r.x + (r.width - w) / 2), (int)(r.y + 5), 8, RAYWHITE);
+    };
+    button(up, "^");  button(down, "v");
+    button(left, "<"); button(right, ">");
+    button(mid, "o");
+
+    DrawText("[C] close", 20, 172, 7, Color{ 170, 220, 140, 255 });	
+}
+
 //Concurrency MVP.
 
-using LogEntry=std::tuple<GameState, std::chrono::time_point<std::chrono::system_clock>>;
+using LogEntry=std::tuple<TimeShot, std::chrono::time_point<std::chrono::system_clock>>;
 std::vector<LogEntry> timeLogger;
 std::mutex stateMutex;
 std::atomic<bool> loggerRunning{false};
+
+
+
+
 
 
 //Threading function.
@@ -81,7 +166,7 @@ void loggerThread(GameState* state){
 		next+=seconds(1);
 		{
 			std::lock_guard<std::mutex> lock(stateMutex);
-			timeLogger.emplace_back(*state,system_clock::now());
+			timeLogger.emplace_back(extract(*state),system_clock::now());
 			
 		}
 		std::this_thread::sleep_until(next);
@@ -641,6 +726,8 @@ void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
 
     EndMode2D();
 
+
+
     // LightingMap works in map-local coordinates (0,0 = the map's top-left
     // corner), so subtract mapOrigin from every world position we give it.
     // It draws in screen space, so this call stays outside BeginMode2D.
@@ -659,6 +746,7 @@ void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
         (int)view.x - originX, (int)view.y - originY,   // top-left of the screen, map-local
         SCREEN_WIDTH, SCREEN_HEIGHT
     );
+
     // Item and exit live in the world, so they go through the camera too.
     BeginMode2D(camera);
 
@@ -799,7 +887,11 @@ void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
 
     std::string loopText = "Loop: " + std::to_string(state->currentLoop) + "/3";
     DrawText(loopText.c_str(), 8, 22, 10, RAYWHITE);
+    if (IsKeyPressed(KEY_C)) state->controller.open = !state->controller.open;
+    if (state->controller.open) drawController(state, mousePos, deltaTime);
 }
+
+
 
 void chronosConfrontationScreen(GameState* state, float deltaTime) {
     const char* lines[] = {
@@ -915,6 +1007,8 @@ void mainLoop(void* data) {
     float deltaTime = GetFrameTime();
     Vector2 gameMousePos = getGameMousePos();
 
+	{
+	std::lock_guard<std::mutex> lock(stateMutex);
     BeginTextureMode(state->screenTexture);
         if (state->currentScreen == SCREEN_MENU) {
             menuScreen(state, gameMousePos);
@@ -930,6 +1024,7 @@ void mainLoop(void* data) {
             chronosConfrontationScreen(state, deltaTime);
         }
     EndTextureMode();
+	}
 
     BeginDrawing();
         ClearBackground(BLACK);
