@@ -2,10 +2,6 @@
 #include <emscripten/emscripten.h>
 #endif
 #include <raylib.h>
-#include "chronos.h"
-#include "lighting.h"
-#include "Map.h"
-#include "animated_sprite.h"
 
 #include <cstdint>
 #include <vector>
@@ -19,128 +15,13 @@
 #include <thread>
 #include <mutex>
 #include <chrono>
-#define SCREEN_WIDTH 240
-#define SCREEN_HEIGHT 240
 
-#define PLAYER_RECT_SIZE 16
-#define PLAYER_VELOCITY_MAX 100
-#define PLAYER_ACCELERATION 15
-#define PLAYER_LIGHT_SIZE 100
-
-// World size, in tiles. 120 x 120 tiles of 16px = 1920 x 1920 world pixels,
-// about 8 screens wide. Raise MAP_*_TILES for a bigger world.
-#define MAP_WIDTH_TILES 120
-#define MAP_HEIGHT_TILES 120
-#define TILE_SIZE 16
-
-enum ScreenState {
-    SCREEN_MENU,
-    SCREEN_SELECT,
-    SCREEN_DIALOGUE,
-    SCREEN_GAME,
-    SCREEN_CHRONOS_CONFRONTATION
-};
-
-enum GameOverReason {
-    GAME_OVER_NONE,
-    GAME_OVER_TIME,
-    GAME_OVER_CAUGHT
-};
-
-struct Player {
-    float x, y;
-    float velx, vely;
-};
-
-struct Collectible {
-    Vector2 position;
-    bool collected;
-};
-
-struct Controller {
-	bool open=false;
-	Vector2 cursor={0.5f,0.5f};
-};
-
-struct Exit {
-    Vector2 position;
-    bool unlocked;
-};
-
-//The full description of a moment in the game.
-struct GameAssets {
-    Shader crtShader;
-
-    Texture players[2];
-    Music bgm;
-    Sound chronosVoices[3];
-    Texture chronosPortrait;
-
-    AnimatedSprite chronosSprite;
-};
-
-//Streamlined version that is used to optimise storage space.
-struct TimelineSnapShot{
-	int currentLoop;
-	float timeRemaining;
-
-	Player player;
-	Chronos chronos;
-	Collectible testItem;
-	Exit testExit;
-	Vector2 mapOrigin;
-}
-
-TimelineSnapShot extract(const GameState& l){
-	TimelineSnapShot t;
-	t.currentLoop=l.currentLoop;
-	t.timeRemaining=l.timeRemaining;
-	t.player=l.player;
-	t.chronos=l.chronos;
-	t.testItem=l.testItem;
-	t.testExit=l.testExit;
-	t.mapOrigin=l.mapOrigin;
-
-	return t;
-
-}
-
-struct GameState {
-    ScreenState currentScreen;
-    int selectedCharacter;
-    float selectAnim;
-    int dialogueIndex = 0;
-
-    Player player;
-    Chronos chronos;
-    TileMap islandMap;
-    Vector2 mapOrigin = {0.0f, 0.0f}; // world position of the map's top-left corner
-    LightingMap lightingMap;
-    Collectible testItem;
-    Exit testExit;
-
-    int currentLoop = 1;
-    float timeRemaining = 60.0f;
-    bool gameOver = false;
-    bool victory = false;
-    GameOverReason gameOverReason = GAME_OVER_NONE;
-    bool chronosDangerous = false;
-    float chronosHitCooldown = 0.0f;
-    float playerHitFlash = 0.0f;
-    float playerShakeTimer = 0.0f;
-
-    // Chronos confrontation variables
-    int confrontationLineIndex = 0;
-    float typewriterTimer = 0.0f;
-    int displayedChars = 0;
-    bool voicePlayed = false;
-
-    GameAssets assets;
-
-    RenderTexture2D screenTexture;
-};
-
-
+#include "util.h"
+#include "chronos.h"
+#include "lighting.h"
+#include "Map.h"
+#include "animated_sprite.h"
+#include "game.h"
 
 Vector2 getGameMousePos() {
     Vector2 mousePos = GetMousePosition();
@@ -253,6 +134,10 @@ void selectScreen(GameState* state, Vector2 mousePos) {
         state->currentScreen = SCREEN_DIALOGUE;
     }
 
+    if (IsKeyPressed(KEY_ESCAPE)) {
+        state->currentScreen = SCREEN_MENU;
+    }
+
     Rectangle jamieHit = { 20.0f, 44.0f, 96.0f, 106.0f };
     Rectangle carolHit = { 124.0f, 44.0f, 96.0f, 106.0f };
 
@@ -281,45 +166,41 @@ void selectScreen(GameState* state, Vector2 mousePos) {
     float jitterX = (std::sin(t * 35.0f) > 0.92f) ? 2.0f : 0.0f;
     float jitterY = (std::cos(t * 27.0f) < -0.94f) ? -1.0f : 0.0f;
 
-    ClearBackground(Color{ 8, 12, 9, 255 });
+    drawMenuBackdrop(t, jitterX);
 
-    DrawSlantedQuad(-35.0f, 0.0f, 55.0f, (float)SCREEN_HEIGHT, 55.0f, Color{ 14, 24, 16, 255 });
-    DrawSlantedQuad(115.0f, 0.0f, 75.0f, (float)SCREEN_HEIGHT, 48.0f, Color{ 16, 28, 20, 255 });
-
-    float scanY = std::fmod(t * 36.0f, (float)SCREEN_HEIGHT);
-    DrawRectangle(0, (int)scanY, SCREEN_WIDTH, 2, Color{ 0x23, 0x7b, 0x52, 45 });
-
-    DrawSlantedQuad(12.0f + jitterX, 14.0f, 220.0f, 22.0f, -15.0f, Color{ 0x33, 0x65, 0x02, 90 });
-    DrawSlantedQuad(10.0f, 12.0f, 220.0f, 22.0f, -15.0f, Color{ 16, 24, 19, 255 });
-    DrawSlantedQuad(12.0f, 12.0f, 6.0f, 22.0f, -15.0f, Color{ 0x33, 0x65, 0x02, 255 });
-    DrawSlantedQuad(18.0f, 12.0f, 2.0f, 22.0f, -15.0f, Color{ 0x23, 0x7b, 0x52, 255 });
-    DrawText("Select your Character", 28 + (int)jitterX, 17, 10, Color{ 190, 230, 170, 255 });
-    DrawText("Fugit Hora", 180, 18, 8, Color{ 0x23, 0x7b, 0x52, 255 });
+    // Header panel
+    DrawSlantedQuad(12.0f + jitterX, 14.0f, 220.0f, 22.0f, -15.0f, Color{ 150, 80, 200, 90 });
+    DrawSlantedQuad(10.0f, 12.0f, 220.0f, 22.0f, -15.0f, Color{ 24, 14, 36, 255 });
+    DrawSlantedQuad(12.0f, 12.0f, 6.0f, 22.0f, -15.0f, Color{ 212, 175, 55, 255 });
+    DrawSlantedQuad(18.0f, 12.0f, 2.0f, 22.0f, -15.0f, Color{ 150, 80, 200, 255 });
+    DrawText("Select your Character", 28 + (int)jitterX, 17, 10, Color{ 240, 210, 130, 255 });
 
     for (int i = 0; i < 2; i++) {
         bool selected = (state->selectedCharacter == i);
         float slant = (i == 0) ? -14.0f : -8.0f;
         float x = ((i == 0) ? 22.0f : 126.0f) + (selected ? jitterX : 0.0f);
-        float y = (selected ? 41.0f : 47.0f) + (selected ? jitterY : 0.0f); 
+        float y = (selected ? 41.0f : 47.0f) + (selected ? jitterY : 0.0f);
         float w = 92.0f;
         float h = selected ? 109.0f : 99.0f;
 
         if (selected) {
-            DrawSlantedQuad(x + 5.0f, y + 4.0f, w, h, slant - 2.0f, Color{ 0x33, 0x65, 0x02, 110 });
-            DrawSlantedQuad(x - 3.0f, y - 2.0f, w, h, slant + 1.0f, Color{ 0x23, 0x7b, 0x52, 85 });
+            DrawSlantedQuad(x + 5.0f, y + 4.0f, w, h, slant - 2.0f, Color{ 150, 80, 200, 110 });
+            DrawSlantedQuad(x - 3.0f, y - 2.0f, w, h, slant + 1.0f, Color{ 212, 175, 55, 85 });
         } else {
-            DrawSlantedQuad(x + 3.0f, y + 4.0f, w, h, slant, Color{ 3, 6, 4, 210 });
+            DrawSlantedQuad(x + 3.0f, y + 4.0f, w, h, slant, Color{ 5, 3, 8, 210 });
         }
 
-        Color cardColor = selected ? Color{ 20, 32, 24, 255 } : Color{ 12, 17, 14, 255 };
+        Color cardColor = selected ? Color{ 40, 24, 58, 255 } : Color{ 18, 11, 26, 255 };
         DrawSlantedQuad(x, y, w, h, slant, cardColor);
 
-        Color accentColor = selected ? Color{ 0x33, 0x65, 0x02, 255 } : Color{ 0x23, 0x7b, 0x52, 120 };
+        Color accentColor = selected ? Color{ 150, 80, 200, 255 } : Color{ 96, 60, 130, 120 };
         DrawSlantedQuad(x + 1.0f, y, w - 2.0f, 4.0f, slant, accentColor);
-        DrawSlantedQuad(x, y + h - 2.0f, w, 2.0f, slant, selected ? Color{ 0x23, 0x7b, 0x52, 255 } : Color{ 25, 40, 30, 255 });
+        DrawSlantedQuad(x, y + h - 2.0f, w, 2.0f, slant,
+                        selected ? Color{ 212, 175, 55, 255 } : Color{ 34, 22, 46, 255 });
 
         const char* numTag = (i == 0) ? "01" : "02";
-        DrawText(numTag, (int)(x + 14.0f), (int)(y + 8.0f), 10, selected ? Color{ 0x23, 0x7b, 0x52, 255 } : Color{ 40, 60, 48, 255 });
+        DrawText(numTag, (int)(x + 14.0f), (int)(y + 8.0f), 10,
+                 selected ? Color{ 212, 175, 55, 255 } : Color{ 60, 44, 80, 255 });
 
         float spriteSize = selected ? 38.0f : 28.0f;
         float spriteY = y + (selected ? 22.0f : 24.0f);
@@ -330,7 +211,7 @@ void selectScreen(GameState* state, Vector2 mousePos) {
                 state->assets.players[i],
                 { 0, 0, (float)PLAYER_RECT_SIZE, (float)PLAYER_RECT_SIZE },
                 { spriteX + 2.0f, spriteY, spriteSize, spriteSize },
-                { 0, 0 }, 0.0f, Color{ 0x33, 0x65, 0x02, 160 }
+                { 0, 0 }, 0.0f, Color{ 150, 80, 200, 160 }
             );
         }
 
@@ -338,14 +219,14 @@ void selectScreen(GameState* state, Vector2 mousePos) {
             state->assets.players[i],
             { 0, 0, (float)PLAYER_RECT_SIZE, (float)PLAYER_RECT_SIZE },
             { spriteX, spriteY, spriteSize, spriteSize },
-            { 0, 0 }, 0.0f, selected ? WHITE : Color{ 110, 140, 120, 190 }
+            { 0, 0 }, 0.0f, selected ? WHITE : Color{ 130, 110, 150, 190 }
         );
 
         const char* name = (i == 0) ? "JAMIE" : "CAROL";
-        Color nameColor = selected ? Color{ 200, 240, 180, 255 } : Color{ 85, 115, 95, 255 };
-        
+        Color nameColor = selected ? Color{ 255, 230, 160, 255 } : Color{ 120, 100, 140, 255 };
+
         if (selected) {
-            DrawSlantedQuad(x + 8.0f, y + h - 26.0f, w - 16.0f, 16.0f, -6.0f, Color{ 0x33, 0x65, 0x02, 255 });
+            DrawSlantedQuad(x + 8.0f, y + h - 26.0f, w - 16.0f, 16.0f, -6.0f, Color{ 150, 80, 200, 255 });
             int nw = MeasureText(name, 10);
             DrawText(name, (int)(x + (w - nw) / 2.0f), (int)(y + h - 23.0f), 10, nameColor);
         } else {
@@ -357,27 +238,27 @@ void selectScreen(GameState* state, Vector2 mousePos) {
     float descY = 162.0f;
     float descH = 50.0f;
 
-    DrawSlantedQuad(18.0f - jitterX, descY + 4.0f, 210.0f, descH, -13.0f, Color{ 0x33, 0x65, 0x02, 80 });
-    DrawSlantedQuad(14.0f, descY, 212.0f, descH, -11.0f, Color{ 13, 20, 15, 255 });
-    DrawSlantedQuad(12.0f, descY, 5.0f, descH, -11.0f, Color{ 0x33, 0x65, 0x02, 255 });
-    DrawSlantedQuad(17.0f, descY, 2.0f, descH, -11.0f, Color{ 0x23, 0x7b, 0x52, 255 });
+    DrawSlantedQuad(18.0f - jitterX, descY + 4.0f, 210.0f, descH, -13.0f, Color{ 150, 80, 200, 80 });
+    DrawSlantedQuad(14.0f, descY, 212.0f, descH, -11.0f, Color{ 20, 12, 30, 255 });
+    DrawSlantedQuad(12.0f, descY, 5.0f, descH, -11.0f, Color{ 212, 175, 55, 255 });
+    DrawSlantedQuad(17.0f, descY, 2.0f, descH, -11.0f, Color{ 150, 80, 200, 255 });
 
     if (state->selectedCharacter == 0) {
-        DrawText("2nd Year Uni Student", 26 + (int)jitterX, (int)descY + 6, 8, Color{ 150, 215, 110, 255 });
-        DrawText("Ability", 26, (int)descY + 18, 8, Color{ 0x23, 0x7b, 0x52, 255 });
-        DrawText(": Radar ping detects clues", 66, (int)descY + 18, 8, Color{ 165, 190, 175, 255 });
-        DrawText("Trait", 26, (int)descY + 30, 8, Color{ 0x33, 0x65, 0x02, 255 });
-        DrawText(": Lower field of vision", 66, (int)descY + 30, 8, Color{ 120, 145, 130, 255 });
+        DrawText("2nd Year Uni Student", 26 + (int)jitterX, (int)descY + 6, 8, Color{ 240, 210, 130, 255 });
+        DrawText("Ability", 26, (int)descY + 18, 8, Color{ 212, 175, 55, 255 });
+        DrawText(": Radar ping detects clues", 66, (int)descY + 18, 8, Color{ 190, 170, 200, 255 });
+        DrawText("Trait", 26, (int)descY + 30, 8, Color{ 150, 80, 200, 255 });
+        DrawText(": Lower field of vision", 66, (int)descY + 30, 8, Color{ 150, 130, 170, 255 });
     } else {
-        DrawText("2nd Year Uni Student", 26 + (int)jitterX, (int)descY + 6, 8, Color{ 150, 215, 110, 255 });
-        DrawText("Ability", 26, (int)descY + 18, 8, Color{ 0x23, 0x7b, 0x52, 255 });
-        DrawText(": Able to sprint for period", 66, (int)descY + 18, 8, Color{ 165, 190, 175, 255 });
-        DrawText("Trait", 26, (int)descY + 30, 8, Color{ 0x33, 0x65, 0x02, 255 });
-        DrawText(": Lower regular speed", 66, (int)descY + 30, 8, Color{ 120, 145, 130, 255 });
+        DrawText("2nd Year Uni Student", 26 + (int)jitterX, (int)descY + 6, 8, Color{ 240, 210, 130, 255 });
+        DrawText("Ability", 26, (int)descY + 18, 8, Color{ 212, 175, 55, 255 });
+        DrawText(": Able to sprint for period", 66, (int)descY + 18, 8, Color{ 190, 170, 200, 255 });
+        DrawText("Trait", 26, (int)descY + 30, 8, Color{ 150, 80, 200, 255 });
+        DrawText(": Lower regular speed", 66, (int)descY + 30, 8, Color{ 150, 130, 170, 255 });
     }
 
-    DrawText("Left/Right", 12, 222, 7, Color{ 0x23, 0x7b, 0x52, 200 });
-    DrawText("[ENTER] Start", 140, 222, 7, Color{ 170, 220, 140, 255 });
+    DrawText("Left/Right", 12, 222, 7, Color{ 212, 175, 55, 200 });
+    DrawText("[ENTER] Start", 140, 222, 7, Color{ 220, 190, 120, 255 });
 }
 
 void dialogueScreen(GameState* state) {
@@ -484,7 +365,6 @@ void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
         state->chronosHitCooldown = 0.0f;
         state->playerHitFlash = 0.0f;
         state->playerShakeTimer = 0.0f;
-        state->testItem.collected = false;
         state->testExit.unlocked = false;
         state->player.x = SCREEN_WIDTH / 2.0f;
         state->player.y = SCREEN_HEIGHT / 2.0f;
@@ -512,7 +392,6 @@ void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
                 state->player.vely = 0.0f;
                 state->chronos.position = state->chronos.waypointA;
                 state->chronos.movingToB = true;
-                state->testItem.collected = false;
                 state->chronosHitCooldown = 0.0f;
                 state->playerHitFlash = 0.0f;
                 state->playerShakeTimer = 0.0f;
@@ -532,6 +411,8 @@ void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
     if (!state->victory) {
         updateChronos(state->chronos, deltaTime, state->chronosDangerous);
     }
+
+    state->testExit.unlocked = state->collectiblesCollected >= state->collectibles.size();
 
     // The camera keeps the player at the centre of the screen, and mousePos is
     // in screen space, so the aim angle is measured from the screen centre.
@@ -671,19 +552,6 @@ void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
         }
     }
 
-    if (!state->gameOver && !state->victory &&
-        !state->testItem.collected && IsKeyPressed(KEY_E)) {
-        const float dx = state->player.x - state->testItem.position.x;
-        const float dy = state->player.y - state->testItem.position.y;
-        const float distance = std::sqrt(dx * dx + dy * dy);
-
-        if (distance <= 16.0f) {
-            state->testItem.collected = true;
-        }
-    }
-
-    state->testExit.unlocked = state->testItem.collected;
-
     if (state->testExit.unlocked && IsKeyPressed(KEY_E)) {
         const float dx = state->player.x - state->testExit.position.x;
         const float dy = state->player.y - state->testExit.position.y;
@@ -794,13 +662,37 @@ void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
     // Item and exit live in the world, so they go through the camera too.
     BeginMode2D(camera);
 
-    if (!state->testItem.collected) {
-        DrawRectangle(
-            (int)state->testItem.position.x - 4,
-            (int)state->testItem.position.y - 4,
-            8,
-            8,
-            GOLD
+    state->assets.cogSprite.updateFrame(deltaTime);
+
+    for (const Collectible& collectible : state->collectibles) {
+        if (collectible.collected) {
+            continue;
+        }
+
+        const Texture* texture = NULL;
+        switch (collectible.type) {
+            case COLLECTIBLE_COG: texture = &state->assets.cogSprite.getCurrentTexture();
+
+            default: break;
+        }
+
+        if (!texture) {
+            continue;
+        }
+
+        DrawTexturePro(
+            state->assets.cogSprite.getCurrentTexture(),
+            {0, 0, (float)texture->width, (float)texture->height},
+            {
+                collectible.position.x, collectible.position.y,
+                (float)texture->width, (float)texture->height
+            },
+            {
+                (float)texture->width / 2,
+                (float)texture->height / 2
+            },
+            0.0f,
+            {180, 180, 180, 255}
         );
     }
 
@@ -816,27 +708,51 @@ void gameScreen(GameState* state, Vector2 mousePos, float deltaTime) {
 
     // HUD (screen space)
     DrawText(
-        state->testItem.collected ? "Item: 1/1" : "Item: 0/1",
+        ("Items: " +
+        std::to_string(state->collectiblesCollected) + "/" +
+        std::to_string(state->collectibles.size())).c_str(),
         8,
         8,
         10,
         RAYWHITE
     );
 
+    // test for item pickups
     if (!state->gameOver && !state->victory) {
-        const float itemDx = state->player.x - state->testItem.position.x;
-        const float itemDy = state->player.y - state->testItem.position.y;
-        const float itemDistance = std::sqrt(itemDx * itemDx + itemDy * itemDy);
-        const float exitDx = state->player.x - state->testExit.position.x;
-        const float exitDy = state->player.y - state->testExit.position.y;
-        const float exitDistance = std::sqrt(exitDx * exitDx + exitDy * exitDy);
+        bool drawnCollectTooltip = false;
 
-        if (!state->testItem.collected && itemDistance <= 28.0f) {
-            DrawText("Press E to collect", 62, 190, 10, GOLD);
-        } else if (state->testItem.collected && exitDistance <= 30.0f) {
-            DrawText("Press E to escape", 68, 190, 10, GREEN);
-        } else if (!state->testExit.unlocked && exitDistance <= 30.0f) {
-            DrawText("Find the item first", 64, 190, 10, LIGHTGRAY);
+        for (Collectible& collectible : state->collectibles) {
+            if (collectible.collected) {
+                continue;
+            }
+
+            const float itemDx = state->player.x - collectible.position.x;
+            const float itemDy = state->player.y - collectible.position.y;
+            const float itemDistance = std::sqrt(itemDx * itemDx + itemDy * itemDy);
+
+            if (itemDistance <= 28.0f) {
+                DrawText("Press E to collect", 62, 190, 10, GOLD);
+
+                if (IsKeyPressed(KEY_E)) {
+                    collectible.collected = true;
+                    state->collectiblesCollected++;
+                }
+
+                drawnCollectTooltip = true;
+                break;
+            }
+        }
+
+        if (!drawnCollectTooltip) {
+            const float exitDx = state->player.x - state->testExit.position.x;
+            const float exitDy = state->player.y - state->testExit.position.y;
+            const float exitDistance = std::sqrt(exitDx * exitDx + exitDy * exitDy);
+
+            if (state->collectiblesCollected >= state->collectibles.size() && exitDistance <= 30.0f) {
+                DrawText("Press E to escape", 68, 190, 10, GREEN);
+            } else if (!state->testExit.unlocked && exitDistance <= 30.0f) {
+                DrawText("Find the item first", 64, 190, 10, LIGHTGRAY);
+            }
         }
     }
 
@@ -1001,9 +917,10 @@ void mainLoop(void* data) {
 
     BeginTextureMode(state->screenTexture);
         if (state->currentScreen == SCREEN_MENU) {
-			ClearBackground(WHITE);
-			menuLoop(state);
-		} else if (state->currentScreen == SCREEN_SELECT) {
+            menuScreen(state, gameMousePos);
+        } else if (state->currentScreen == SCREEN_CREDITS) {
+            creditsScreen(state, gameMousePos);
+        } else if (state->currentScreen == SCREEN_SELECT) {
             selectScreen(state, gameMousePos);
         } else if (state->currentScreen == SCREEN_DIALOGUE) {
             dialogueScreen(state);
@@ -1089,6 +1006,18 @@ GameAssets loadAssets() {
         0.1f
     );
 
+    assets.cogSprite = AnimatedSprite(
+        {
+            "assets/cog-anim1.png",
+            "assets/cog-anim2.png",
+            "assets/cog-anim3.png",
+            "assets/cog-anim4.png",
+            "assets/cog-anim5.png",
+            "assets/cog-anim6.png"
+        },
+        0.1f
+    );
+
     return assets;
 }
 
@@ -1105,6 +1034,7 @@ void unloadAssets(GameAssets& assets) {
     UnloadMusicStream(assets.bgm);
 
     assets.chronosSprite.unloadTextures();
+    assets.cogSprite.unloadTextures();
 
     assets = {};
 }
@@ -1118,9 +1048,13 @@ int main(int argc, char** argv) {
 
     GameState state = {};
     state.player = {SCREEN_WIDTH / 2.0f, SCREEN_HEIGHT / 2.0f};
-    state.testItem.position = {80.0f, 80.0f};
-    state.testItem.collected = false;
+
+    state.collectibles.push_back(Collectible{COLLECTIBLE_COG, {80.0f, 80.0f}});
+
     state.currentScreen = SCREEN_SELECT;
+    
+    state.menuSelection = 0;
+
     state.selectedCharacter = 0;
     state.selectAnim = 0.0f;
     state.assets = loadAssets();
